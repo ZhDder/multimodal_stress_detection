@@ -18,16 +18,14 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Gemma 4 now supports system prompts natively.
-# Adding <|think|> enables its built-in reasoning mode for better analysis.
-system_prompt = """<|think|>
+system_prompt = """
 You are an expert in behavioral psychology and affective computing.
 Your final answer must be ONLY a valid JSON object. 
 Keep the reasoning field strictly under 2 short and precise sentences.
 """
 
 user_prompt = """
-You are analyzing 5 distinct frames taken from a 5-second window of a person performing a task.
+You are analyzing 5 distinct frames taken from a 5 second window of a person performing a task.
 Your goal is to determine if the subject is exhibiting visual signs of stress or if they are in a neutral/relaxed state.
 
 Focus on these sustained static cues:
