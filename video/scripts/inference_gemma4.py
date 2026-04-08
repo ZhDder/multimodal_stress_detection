@@ -10,6 +10,11 @@ from torch.utils.data import Dataset, DataLoader
 import json
 import re
 import pandas as pd
+import warnings
+from transformers import logging as hf_logging
+
+#warnings.filterwarnings("ignore")
+hf_logging.set_verbosity_error()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,6 +23,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# Gemma 4 now supports system prompts natively.
+# Adding <|think|> enables its built-in reasoning mode for better analysis.
 system_prompt = """
 You are an expert in behavioral psychology and affective computing.
 Your final answer must be ONLY a valid JSON object. 
@@ -25,22 +32,20 @@ Keep the reasoning field strictly under 2 short and precise sentences.
 """
 
 user_prompt = """
-You are analyzing 5 distinct frames taken from a 5 second window of a person performing a task.
-Your goal is to determine if the subject is exhibiting visual signs of stress or if they are in a neutral/relaxed state.
+You are an expert in behavioral psychology and affective computing.
+You are analyzing a 5-second video sequence (sampled at 1 fps) of a person performing a task.
+Your goal is to assess their stress level based on visible behavioral cues.
 
-Focus on these sustained static cues:
-
-Facial Tension: Sustained furrowed brows, tense/pressed lips, or a locked jaw across multiple frames.
-
-Hand-to-Face Contact: Hands covering the mouth, pulling at hair, or resting heavily on the face (self-soothing).
-
-Posture: Unusually rigid neck/shoulders, or leaning heavily into the screen.
+Focus on the following indicators:
+- Facial Expressions: Furrowed brows, pressed lips, clenched jaw, flared nostrils
+- Eye Movement: Rapid blinking, gaze aversion, widened eyes
+- Body Language: Face/hair touching (self-soothing), rigid posture, fidgeting
 
 Respond ONLY with a valid JSON object, and nothing else:
 {"stress_level": <integer 0-10>, "confidence": <float 0.0-1.0>, "reasoning": "<max 2 sentences, short and precise>"}
 """
 
-BATCH_SIZE  = 2  #adjust this depending on VRAM
+BATCH_SIZE  = 2  # You might need to adjust this depending on your VRAM
 NUM_WORKERS = 0   
 JSON_RE     = re.compile(r"```json\n|\n```|```")
 
@@ -76,13 +81,24 @@ class StressWindowDataset(Dataset):
             os.path.join(window_path, f)
             for f in os.listdir(window_path) if f.endswith('.jpg')
         )
-        # Load the frames that represent our video window
+        
+        # Load the frames
         images = [Image.open(p).convert("RGB") for p in image_paths]
+        
+        # FIX: Ensure all frames in the sequence have identical dimensions for np.stack()
+        # We'll use the dimensions of the first frame as the target size.
+        if images:
+            target_size = images[0].size  # (width, height)
+            images = [
+                img.resize(target_size, Image.Resampling.LANCZOS) if img.size != target_size else img 
+                for img in images
+            ]
+
         return {
             "subject":   subject,
             "activity":  act.split('_')[1],
             "window_id": int(window.split('_')[1]),
-            "frames":    images, # renamed for clarity
+            "frames":    images, 
         }
 
 def collate_fn(batch):
@@ -150,14 +166,16 @@ if __name__ == '__main__':
         "google/gemma-4-E4B-it",
         torch_dtype=torch.bfloat16,   
         device_map="auto",
-        attn_implementation="flash_attention_2"
+       #attn_implementation="flash_attention_2"
     )
     model.eval()
     processor = AutoProcessor.from_pretrained("google/gemma-4-E4B-it")
     processor.tokenizer.padding_side = "left"
+    processor.video_processor.num_frames = 5
+
     log.info(f'Model ready  ({time.time() - t_model:.1f}s)')
 
-    dataset = StressWindowDataset('./test_data')
+    dataset = StressWindowDataset('/data/processed_data_cropped')
     log.info(f'Dataset scanned — {len(dataset)} windows found')
 
     loader = DataLoader(
@@ -191,11 +209,15 @@ if __name__ == '__main__':
                     return_dict=True,
                     return_tensors="pt",
                     padding=True,
+	 	    processor_kwargs={
+                        "num_frames": 5, 
+                        "fps": 1.0  
+                    }
                 ).to(model.device)
 
                 generated_ids = model.generate(
                     **inputs, 
-                    max_new_tokens=256, # Increased slightly to accommodate the thinking tokens
+                    max_new_tokens=128,
                     pad_token_id=processor.tokenizer.pad_token_id or processor.tokenizer.eos_token_id
                 )
 
@@ -238,7 +260,7 @@ if __name__ == '__main__':
     if parse_errors:
         log.warning(f'{parse_errors}/{len(all_predictions)} outputs failed JSON parsing')
 
-    out_path = "./Gemma4_E4B_IT_cropped_results.csv"
+    out_path = "/workspace/Gemma4_E4B_IT_cropped_results.csv"
     df_predictions = pd.DataFrame(all_predictions)
     df_predictions.to_csv(out_path, index=False)
 
